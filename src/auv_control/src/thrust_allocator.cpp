@@ -41,13 +41,19 @@ void ThrustAllocator::set_fault_factors(const std::array<double, 4> & f) {
 // ---------------------------------------------------------------------------
 //  Weighted pseudo-inverse (Eq. 37):
 //        T = W^{-1} B^T (B W^{-1} B^T)^{-1} tau
+//
+//  B has a zero row for tau_y (the torpedo has no sway thruster), which
+//  makes M = B Winv B^T rank-deficient. LDLT on a singular matrix returns
+//  garbage; the symptom was the allocator handing back u_virtual unchanged
+//  no matter how high the fault weights pushed Winv. We add a small
+//  Tikhonov term to the kernel direction so the solve stays well-posed.
+//  The minimum-norm solution in the row-space of B is unaffected.
 // ---------------------------------------------------------------------------
 ControlVec ThrustAllocator::pseudo_inverse(const WrenchVec & tau) const {
   const Eigen::Matrix<double, 4, 4> Winv = W_.inverse();
-  const Eigen::Matrix<double, 5, 5> M    = B_ * Winv * B_.transpose();
-  // Use LDLT for the small 5x5 SPD system (fast + stable).
-  Eigen::Matrix<double, 5, 1> lambda =
-      M.ldlt().solve(tau);
+  Eigen::Matrix<double, 5, 5> M = B_ * Winv * B_.transpose();
+  M += 1.0e-9 * Eigen::Matrix<double, 5, 5>::Identity();
+  Eigen::Matrix<double, 5, 1> lambda = M.ldlt().solve(tau);
   return Winv * B_.transpose() * lambda;
 }
 
@@ -71,8 +77,11 @@ ControlVec ThrustAllocator::solve_qp(const WrenchVec & tau_des,
   if (converged) *converged = false;
 
   // Start from the unweighted (plain) pseudo-inverse — the QP objective has
-  // no W, so start from the minimum-norm feasible point.
-  const Eigen::Matrix<double, 5, 5> BBT = B_ * B_.transpose();
+  // no W, so start from the minimum-norm feasible point. Same Tikhonov
+  // regularization as pseudo_inverse() to keep the tau_y kernel from
+  // breaking LDLT.
+  Eigen::Matrix<double, 5, 5> BBT = B_ * B_.transpose();
+  BBT += 1.0e-9 * Eigen::Matrix<double, 5, 5>::Identity();
   Eigen::Matrix<double, 5, 1> lambda = BBT.ldlt().solve(tau_des);
   ControlVec v = B_.transpose() * lambda;
 
@@ -146,8 +155,11 @@ ControlVec ThrustAllocator::solve_qp(const WrenchVec & tau_des,
       Bfree.col(k) = B_.col(free_idx[k]);
     }
 
-    // Solve B_free B_free^T  lambda = rhs  (5x5 SPD for the equality part).
-    const Eigen::Matrix<double, 5, 5> M = Bfree * Bfree.transpose();
+    // Solve B_free B_free^T  lambda = rhs  (5x5 SPD for the equality part),
+    // Tikhonov-regularized for the tau_y kernel just like the unconstrained
+    // pseudo-inverse above.
+    Eigen::Matrix<double, 5, 5> M = Bfree * Bfree.transpose();
+    M += 1.0e-9 * Eigen::Matrix<double, 5, 5>::Identity();
     lambda = M.ldlt().solve(rhs);
 
     Eigen::VectorXd vfree = Bfree.transpose() * lambda;
