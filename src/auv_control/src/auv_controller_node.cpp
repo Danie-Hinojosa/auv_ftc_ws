@@ -188,26 +188,43 @@ class AUVController : public rclcpp::Node {
   // ===== Callbacks ======================================================
   void onOdom(const nav_msgs::msg::Odometry::SharedPtr msg) {
     std::lock_guard<std::mutex> lk(mtx_);
+
+    // If Gazebo physics has diverged the AUV (contact blow-up, runaway
+    // angular rate), p3d starts emitting NaN. Accepting it would propagate
+    // the NaN into x_ -> u_virtual -> tau -> wrench -> Gazebo input, which
+    // permanently destroys the simulation. Drop the message instead and
+    // keep the last sane state; step() will then publish a zero wrench so
+    // gravity alone can settle the model.
+    const auto & tw = msg->twist.twist;
+    const auto & po = msg->pose.pose;
+    if (!std::isfinite(po.position.x) || !std::isfinite(po.position.y) ||
+        !std::isfinite(po.position.z) ||
+        !std::isfinite(tw.linear.x)  || !std::isfinite(tw.linear.y) ||
+        !std::isfinite(tw.linear.z)  || !std::isfinite(tw.angular.x) ||
+        !std::isfinite(tw.angular.y) || !std::isfinite(tw.angular.z)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "ignoring non-finite odometry (physics likely diverged)");
+      return;
+    }
+
     have_odom_ = true;
     odom_count_++;
 
     // Body-frame twist (REP-105: child_frame_id = base_link).
-    x_(0) = msg->twist.twist.linear.x;
-    x_(1) = msg->twist.twist.linear.y;
-    x_(2) = msg->twist.twist.linear.z;
-    x_(3) = msg->twist.twist.angular.y;
-    x_(4) = msg->twist.twist.angular.z;
-    p_roll_ = msg->twist.twist.angular.x;
+    x_(0) = tw.linear.x;
+    x_(1) = tw.linear.y;
+    x_(2) = tw.linear.z;
+    x_(3) = tw.angular.y;
+    x_(4) = tw.angular.z;
+    p_roll_ = tw.angular.x;
 
     // World-frame pose.
-    pos_x_ = msg->pose.pose.position.x;
-    pos_y_ = msg->pose.pose.position.y;
-    pos_z_ = msg->pose.pose.position.z;
+    pos_x_ = po.position.x;
+    pos_y_ = po.position.y;
+    pos_z_ = po.position.z;
 
-    tf2::Quaternion q(msg->pose.pose.orientation.x,
-                      msg->pose.pose.orientation.y,
-                      msg->pose.pose.orientation.z,
-                      msg->pose.pose.orientation.w);
+    tf2::Quaternion q(po.orientation.x, po.orientation.y,
+                      po.orientation.z, po.orientation.w);
     tf2::Matrix3x3(q).getRPY(roll_, pitch_, yaw_);
   }
 
@@ -257,6 +274,22 @@ class AUVController : public rclcpp::Node {
   void step() {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!have_odom_) return;
+
+    // If the cached state itself is unrealistic (e.g. Gazebo handed us a
+    // finite-but-huge value before fully diverging), trying to compute a
+    // wrench for it just feeds the runaway. Publish zero and bail.
+    const bool state_sane =
+        std::abs(x_(0)) < 10.0 && std::abs(x_(1)) < 10.0 &&
+        std::abs(x_(2)) < 10.0 && std::abs(x_(3)) < 10.0 &&
+        std::abs(x_(4)) < 10.0 && std::abs(pos_z_) < 200.0;
+    if (!state_sane) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "state out of bounds (|x|=[%.1f %.1f %.1f %.1f %.1f] z=%.1f); "
+        "publishing zero wrench",
+        x_(0), x_(1), x_(2), x_(3), x_(4), pos_z_);
+      pub_wrench_->publish(geometry_msgs::msg::Wrench{});
+      return;
+    }
 
     // 1) Faults / priority matrix.
     updateFaults();
@@ -310,6 +343,18 @@ class AUVController : public rclcpp::Node {
     w.torque.x = restore_M.x() + drag_moment.x();
     w.torque.y = tau_actual(3) + restore_M.y() + drag_moment.y();
     w.torque.z = tau_actual(4) + restore_M.z() + drag_moment.z();
+
+    // Last-line defense: if the state went non-finite (e.g., x_ from a
+    // half-processed odom, or u_virtual blew up), every term above is NaN
+    // and Gazebo permanently corrupts itself. Publish a zero wrench instead
+    // so gravity can settle the model on its own.
+    if (!std::isfinite(w.force.x)  || !std::isfinite(w.force.y)  ||
+        !std::isfinite(w.force.z)  || !std::isfinite(w.torque.x) ||
+        !std::isfinite(w.torque.y) || !std::isfinite(w.torque.z)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "non-finite wrench suppressed; publishing zero");
+      w = geometry_msgs::msg::Wrench{};
+    }
     pub_wrench_->publish(w);
 
     // 6) Diagnostics.
