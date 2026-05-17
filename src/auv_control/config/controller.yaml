@@ -12,6 +12,7 @@
     kp_yaw:               1.0
     cruise_speed:         0.6
     waypoint_radius:      0.8
+    approach_decel:       3.0    # taper cruise to 0 over the last 2.4 m before each wp
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
     trajectory:        "lawnmower"

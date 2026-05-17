@@ -84,6 +84,11 @@ class AUVController : public rclcpp::Node {
     declare_parameter("kp_yaw",           1.0);
     declare_parameter("cruise_speed",     0.6);
     declare_parameter("waypoint_radius",  0.8);
+    // Multiplier of waypoint_radius defining where the speed taper starts.
+    // u_ref ramps from cruise at range = approach_decel * radius down to 0
+    // at range = radius, so the AUV brakes before crossing each waypoint
+    // instead of overshooting at full cruise.
+    declare_parameter("approach_decel",   3.0);
     // Trajectory generator.
     declare_parameter<std::string>("trajectory", "lawnmower");
     declare_parameter("traj_scale",       6.0);
@@ -116,6 +121,7 @@ class AUVController : public rclcpp::Node {
     get_parameter("kp_yaw",   kp_yaw_);
     get_parameter("cruise_speed",    cruise_speed_);
     get_parameter("waypoint_radius", waypoint_radius_);
+    get_parameter("approach_decel",  approach_decel_);
 
     auto tname = get_parameter("trajectory").as_string();
     double scale, depth;
@@ -404,15 +410,24 @@ class AUVController : public rclcpp::Node {
     while (yaw_err >  3.14159) yaw_err -= 2 * 3.14159;
     while (yaw_err < -3.14159) yaw_err += 2 * 3.14159;
 
-    // u_ref: cruise speed scaled by yaw alignment. The old gate used
-    // max(cos(yaw_err), 0), which fully cuts surge thrust for any
-    // misalignment above 90 deg and leaves the AUV spinning in place.
-    // Using (1 + cos)/2 keeps a graceful "creep while turning" profile:
-    // factor=1 when aligned, 0.5 at 90 deg, 0 only when facing away.
+    // u_ref: cruise speed scaled by yaw alignment AND by a deceleration
+    // taper near the target. Two factors:
+    //  align       in [0,1] — graceful (1+cos)/2 instead of max(cos,0)
+    //                so the AUV keeps creeping forward while turning.
+    //  decel       in [0,1] — full cruise outside approach_decel * radius,
+    //                linearly ramping down to 0 at the radius edge. Without
+    //                this the pure-pursuit loop arrives at each waypoint at
+    //                full cruise and overshoots several meters before the
+    //                inner loop can brake.
     const double align = 0.5 * (1.0 + std::cos(yaw_err));
+    const double decel_dist =
+        std::max(waypoint_radius_ * approach_decel_, waypoint_radius_ + 0.5);
+    const double decel = std::clamp(
+        (range_xy - waypoint_radius_) / (decel_dist - waypoint_radius_),
+        0.0, 1.0);
     const double u_ref = std::clamp(
         kp_surge_ * range_xy * align,
-        0.0, cruise_speed_);
+        0.0, cruise_speed_ * decel);
 
     // Heave reference proportional to depth error (saturated).
     const double w_ref = std::clamp(-kp_heave_ * dz, -0.4, 0.4);
@@ -557,7 +572,7 @@ class AUVController : public rclcpp::Node {
   // Outer loop / trajectory.
   double GM_ = 0.05;
   double kp_surge_ = 0.6, kp_heave_ = 0.5, kp_yaw_ = 1.0;
-  double cruise_speed_ = 0.6, waypoint_radius_ = 0.8;
+  double cruise_speed_ = 0.6, waypoint_radius_ = 0.8, approach_decel_ = 3.0;
   double surface_z_ = 0.0, hull_half_height_ = 0.15;
   std::vector<Waypoint> trajectory_;
   std::size_t wp_idx_ = 0;

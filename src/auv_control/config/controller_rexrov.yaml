@@ -11,6 +11,7 @@
     kp_yaw:               0.8
     cruise_speed:         0.4
     waypoint_radius:      1.5
+    approach_decel:       3.0
 
     trajectory:        "circle"
     traj_scale:          10.0
