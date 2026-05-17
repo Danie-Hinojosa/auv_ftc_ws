@@ -71,8 +71,13 @@ struct VehicleParams {
 struct AllocParams {
   double alpha = 0.35;   // rad, half-angle of horizontal thruster splay
   double beta  = 0.35;   // rad, half-angle of vertical thruster splay
-  double a     = 0.10;   // m, lateral arm
-  double b     = 0.10;   // m, vertical arm
+  // Lateral / vertical thruster arms. The original 0.10 m was much smaller
+  // than a real torpedo (typical 0.2-0.4 m), which combined with Nr=15
+  // capped the realizable yaw rate at ~0.21 rad/s (3x below what the
+  // outer loop was commanding). Tripled to 0.30 m to give the controller
+  // the moment authority it asks for.
+  double a     = 0.30;   // m, lateral arm
+  double b     = 0.30;   // m, vertical arm
   double l     = 1.00;   // dimensionless scale on tau_x (paper uses symbol "l")
 };
 
