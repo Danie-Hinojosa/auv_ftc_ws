@@ -102,19 +102,26 @@ inline Eigen::Matrix<double, 5, 4> build_B(const AllocParams & g) {
   const double A  = 0.5 * g.b * sa + 0.5 * g.a * ca;
   const double Ba = 0.5 * g.b * cb + 0.5 * g.a * sb;
 
-  // tau_y row is zero: a torpedo with no lateral thruster can't generate
-  // sway. The original (sa, ca, 0, 0) meant every Newton on the heave
-  // channel produced ~0.94 N of lateral force in world frame, dragging
-  // the AUV sideways and decoupling ground-track from heading. The K
-  // matrix's diagonal labels (u1=surge, u2=heave, u3=pitch, u4=yaw) already
-  // assume no sway authority, so the wrench column was just leaking
-  // unrequested lateral disturbance into the plant.
+  // Physical 4-thruster torpedo layout:
+  //   u1, u2: port/stbd surge thrusters at the aft. Collective fire ->
+  //           tau_x (surge force). Differential fire -> tau_n (yaw moment
+  //           via the lateral lever arm Ba).
+  //   u3, u4: top/bottom (or fore/aft) heave thrusters. Collective fire
+  //           -> tau_z (heave force). Differential fire -> tau_m (pitch
+  //           moment via the vertical lever arm A).
+  // The original B had every channel contributing to every axis with
+  // mixed coefficients (and pitch/yaw rows degenerated to the same
+  // scalar). That made the controller's per-channel K gains chase the
+  // wrong axis: ts_fuzzy.cpp says K(1,2)=kw (heave error -> u2), but the
+  // old B had B(2,1)=0 (u2 produced no tau_z), so a heave command
+  // produced only surge force. This new B aligns the columns with the
+  // way ts_fuzzy.cpp now decomposes each channel.
   Eigen::Matrix<double, 5, 4> B;
-  B << g.l * ca,  ca,      cb,      cb,
-       0.0,       0.0,     0.0,     0.0,
-       0.0,       0.0,     cb,      sb,
-       -A,        A,      -A,       A,
-       Ba,       -Ba,     -Ba,      Ba;
+  B << ca,    ca,    0.0,   0.0,
+       0.0,   0.0,   0.0,   0.0,
+       0.0,   0.0,   cb,    cb,
+       0.0,   0.0,   A,    -A,
+       Ba,   -Ba,    0.0,   0.0;
   return B;
 }
 

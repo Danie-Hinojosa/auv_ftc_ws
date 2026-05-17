@@ -12,6 +12,7 @@
     cruise_speed:         0.4
     waypoint_radius:      1.5
     approach_decel:       3.0
+    lookahead:            3.5    # rexrov is bigger and slower, smoother turns
 
     trajectory:        "circle"
     traj_scale:          10.0

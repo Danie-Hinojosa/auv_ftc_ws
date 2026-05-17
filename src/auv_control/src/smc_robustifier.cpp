@@ -9,12 +9,14 @@
 namespace auv_control {
 
 int SMCRobustifier::state_index_for_channel(int ch) {
-  // Same diagonal mapping as make_gain() in ts_fuzzy.cpp:
-  //   ch 0 -> surge   (state u, index 0)
-  //   ch 1 -> heave   (state w, index 2)
-  //   ch 2 -> pitch   (state q, index 3)
-  //   ch 3 -> yaw     (state r, index 4)
-  static constexpr int kMap[4] = {0, 2, 3, 4};
+  // Mapping aligned with the physical actuator layout in build_B + the
+  // collective/differential K structure in ts_fuzzy.cpp:
+  //   ch 0, ch 1 (u1, u2 = port/stbd surge thrusters) -> e_u
+  //   ch 2, ch 3 (u3, u4 = top/bottom heave thrusters) -> e_w
+  // Both thrusters in a pair share the same sliding surface, so the SMC
+  // term injects collective surge / heave force only -- no differential
+  // moment contribution (those are the K matrix's job).
+  static constexpr int kMap[4] = {0, 0, 2, 2};
   return kMap[ch];
 }
 

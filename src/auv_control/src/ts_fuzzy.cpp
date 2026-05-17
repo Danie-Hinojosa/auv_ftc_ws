@@ -25,18 +25,29 @@ double TSFuzzyController::M_t2_pos (double t2) {
 //  point, so we keep the same structural template but bias each K_j for its
 //  local linearization (low speed ~ higher yaw authority, high speed ~ softer
 //  yaw gain to prevent oscillation). State order: [u v w q r].
-//  Actuator mapping: u1=surge, u2=heave, u3=pitch-moment, u4=yaw-moment.
+//
+//  Physical actuator mapping (matches build_B in auv_params.hpp):
+//    u1, u2 = port / stbd surge thrusters. Collective tracks e_u (surge),
+//             differential tracks e_r (yaw rate).
+//    u3, u4 = top / bottom heave thrusters. Collective tracks e_w (heave),
+//             differential tracks e_q (pitch rate).
+//
+//  The original gains were "diagonal" in name only -- each error went to a
+//  single channel that didn't actually produce force on the relevant axis,
+//  so the closed loop was working against itself. Splitting each axis's
+//  error across both channels in its physical pair fixes that.
 // ---------------------------------------------------------------------------
 static Gain make_gain(double ku, double kw, double kq, double kr) {
   Gain K;
   K.setZero();
-  K(0, 0) = ku;       // u1 tracks surge error
-  K(1, 2) = kw;       // u2 tracks heave error
-  K(2, 3) = kq;       // u3 tracks pitch-rate error
-  K(3, 4) = kr;       // u4 tracks yaw-rate error
-  // Small cross-coupling terms (empirical; keep asymptotic stability per
-  // Section 2.2 by keeping Ai+Bi*Kj Hurwitz-dominant on the diagonal).
-  K(3, 1) = -0.10 * kr;   // yaw responds mildly to sway
+  // Surge pair (u1, u2): both drive surge collectively, differential is
+  // what generates yaw moment.
+  K(0, 0) =  ku;   K(0, 4) =  kr;
+  K(1, 0) =  ku;   K(1, 4) = -kr;
+  // Heave pair (u3, u4): both drive heave collectively, differential is
+  // what generates pitch moment.
+  K(2, 2) =  kw;   K(2, 3) =  kq;
+  K(3, 2) =  kw;   K(3, 3) = -kq;
   return K;
 }
 

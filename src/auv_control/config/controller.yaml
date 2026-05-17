@@ -13,6 +13,7 @@
     cruise_speed:         0.6
     waypoint_radius:      0.8
     approach_decel:       3.0    # taper cruise to 0 over the last 2.4 m before each wp
+    lookahead:            2.0    # blend goal toward next_wp over this distance
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
     trajectory:        "lawnmower"

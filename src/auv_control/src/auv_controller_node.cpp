@@ -89,6 +89,10 @@ class AUVController : public rclcpp::Node {
     // at range = radius, so the AUV brakes before crossing each waypoint
     // instead of overshooting at full cruise.
     declare_parameter("approach_decel",   3.0);
+    // Pure-pursuit lookahead. The aim point slides linearly from curr_wp
+    // toward next_wp as range_to_curr drops from waypoint_radius+lookahead
+    // down to waypoint_radius, so the bearing never jumps at wp transitions.
+    declare_parameter("lookahead",        2.0);
     // Trajectory generator.
     declare_parameter<std::string>("trajectory", "lawnmower");
     declare_parameter("traj_scale",       6.0);
@@ -137,6 +141,7 @@ class AUVController : public rclcpp::Node {
     get_parameter("cruise_speed",    cruise_speed_);
     get_parameter("waypoint_radius", waypoint_radius_);
     get_parameter("approach_decel",  approach_decel_);
+    get_parameter("lookahead",       lookahead_);
 
     auto tname = get_parameter("trajectory").as_string();
     double scale, depth;
@@ -454,28 +459,46 @@ class AUVController : public rclcpp::Node {
     wp_idx_ = 0;
   }
 
-  // Pure-pursuit-style outer loop: choose the active waypoint, derive a
-  // body-frame velocity reference (u, w, r) for the T-S fuzzy controller.
+  // Pure-pursuit-style outer loop with lookahead blending. As the AUV
+  // approaches the current waypoint, the goal point slides linearly from
+  // curr_wp toward next_wp, so the bearing is continuous through the
+  // waypoint transition instead of stepping from "aim at curr" to "aim
+  // at next" at the moment of advance. By construction the pre-advance
+  // goal (= next_wp when t_blend=1) and the post-advance goal (= curr_wp
+  // after wp_idx_++ when t_blend=0) are the same point, so r_ref never
+  // jumps — which is what was excitating Gazebo's solver into divergence.
   void updateReferenceFromTrajectory() {
     if (trajectory_.empty()) return;
-    const Waypoint & wp = trajectory_[wp_idx_];
+    const std::size_t next_idx = (wp_idx_ + 1) % trajectory_.size();
+    const Waypoint & curr_wp = trajectory_[wp_idx_];
+    const Waypoint & next_wp = trajectory_[next_idx];
 
-    const double dx = wp.x - pos_x_;
-    const double dy = wp.y - pos_y_;
-    const double dz = wp.z - pos_z_;
-    const double range_xy = std::hypot(dx, dy);
+    const double dx_curr = curr_wp.x - pos_x_;
+    const double dy_curr = curr_wp.y - pos_y_;
+    const double range_curr = std::hypot(dx_curr, dy_curr);
 
-    // Edge-triggered waypoint advance: only when the AUV crosses INTO the
-    // capture radius (transition from outside to inside). The old level-
-    // triggered check (advance every tick while range < radius) wrapped
-    // through the 8-waypoint lawnmower in ~1 s because the AUV starts
-    // already inside wp[0]'s radius and the controller's wall-clock step()
-    // fires faster than the AUV can leave the radius.
-    const bool inside = (range_xy < waypoint_radius_);
+    // Edge-triggered waypoint advance (unchanged): only on outside->inside
+    // transition of the current wp's capture radius.
+    const bool inside = (range_curr < waypoint_radius_);
     if (inside && !was_inside_wp_radius_) {
-      wp_idx_ = (wp_idx_ + 1) % trajectory_.size();
+      wp_idx_ = next_idx;
     }
     was_inside_wp_radius_ = inside;
+
+    // Lookahead blend: aim at a point that's a linear interpolation between
+    // curr_wp and next_wp, weighted by how close we are to curr_wp.
+    //   t_blend = 0  when range_curr >= waypoint_radius_ + lookahead_
+    //   t_blend = 1  when range_curr <= waypoint_radius_
+    const double t_blend = std::clamp(
+        1.0 - (range_curr - waypoint_radius_) / std::max(lookahead_, 1e-3),
+        0.0, 1.0);
+    const double goal_x = curr_wp.x + t_blend * (next_wp.x - curr_wp.x);
+    const double goal_y = curr_wp.y + t_blend * (next_wp.y - curr_wp.y);
+
+    const double dx = goal_x - pos_x_;
+    const double dy = goal_y - pos_y_;
+    const double dz = curr_wp.z - pos_z_;
+    const double range_xy = std::hypot(dx, dy);
 
     const double bearing = std::atan2(dy, dx);
     double yaw_err = bearing - yaw_;
@@ -502,7 +525,13 @@ class AUVController : public rclcpp::Node {
         0.0, cruise_speed_ * decel);
 
     // Heave reference proportional to depth error (saturated).
-    const double w_ref = std::clamp(-kp_heave_ * dz, -0.4, 0.4);
+    // dz = wp.z - pos_z and ROS body Z points up: to descend (pos_z below
+    // wp.z, dz negative) the body twist.z must be negative. The original
+    // code had a minus sign here that inverted the loop — it was
+    // commanding the AUV to RISE whenever the target was deeper than
+    // current depth, which pushed the AUV straight to the surface and was
+    // a major contributor to the long-test divergences.
+    const double w_ref = std::clamp(kp_heave_ * dz, -0.4, 0.4);
 
     // Yaw rate reference proportional to bearing error.
     const double r_ref = std::clamp(kp_yaw_ * yaw_err, -0.6, 0.6);
@@ -657,6 +686,7 @@ class AUVController : public rclcpp::Node {
   double GM_ = 0.05;
   double kp_surge_ = 0.6, kp_heave_ = 0.5, kp_yaw_ = 1.0;
   double cruise_speed_ = 0.6, waypoint_radius_ = 0.8, approach_decel_ = 3.0;
+  double lookahead_ = 2.0;
   double surface_z_ = 0.0, hull_half_height_ = 0.15;
   std::vector<Waypoint> trajectory_;
   std::size_t wp_idx_ = 0;
