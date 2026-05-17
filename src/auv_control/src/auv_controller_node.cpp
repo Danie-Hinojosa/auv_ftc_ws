@@ -533,8 +533,15 @@ class AUVController : public rclcpp::Node {
 
     // u_ref: cruise speed scaled by yaw alignment AND by a deceleration
     // taper near the target. Two factors:
-    //  align       in [0,1] — graceful (1+cos)/2 instead of max(cos,0)
+    //  align       in [0,1] — (1 + cos(yaw_err)) / 2. Graceful gating
     //                so the AUV keeps creeping forward while turning.
+    //                Tried max(cos,0) hard gate to force stop-and-turn,
+    //                but it didn't help: as soon as the AUV passes
+    //                through alignment the body-frame velocity sign
+    //                flips, e_u jumps a couple m/s, the K gains saturate
+    //                u_virtual to +-25 N in a single tick, and Gazebo's
+    //                solver still diverges. The softer gate produces
+    //                fewer guard fires overall.
     //  decel       in [0,1] — full cruise outside approach_decel * radius,
     //                linearly ramping down to 0 at the radius edge. Without
     //                this the pure-pursuit loop arrives at each waypoint at

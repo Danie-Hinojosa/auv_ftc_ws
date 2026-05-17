@@ -21,7 +21,7 @@
     cruise_speed:         0.3
     waypoint_radius:      0.8
     approach_decel:       3.0
-    lookahead:            3.0
+    lookahead:            2.0     # smaller value: less corner-cutting through wp
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
     trajectory:        "lawnmower"
