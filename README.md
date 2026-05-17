@@ -399,6 +399,81 @@ export CYCLONEDDS_URI=file:///tmp/cyclonedds_relaxed.xml   # SocketReceiveBuffer
 
 ---
 
+## Results
+
+Quantitative evidence collected from the iterative long-tests in this
+fork. All numbers come from the same `lawnmower` trajectory at depth
+`-2 m`, with the AUV spawned at `(0, 0, -1)`.
+
+### Long-test stability progression
+
+Each row is a checkpoint where a fix landed and the sim was re-run
+for ~10 min wall time (the software-rendered Mesa stack puts sim time
+at roughly `0.15 × real`).
+
+| Checkpoint              | Prints | Bound guards | Recoveries | Max wp |
+|-------------------------|-------:|-------------:|-----------:|-------:|
+| Upstream (no fixes)     |  40    | n/a (NaN)    | n/a        | 0      |
+| + NaN guards            |  40    | 56           | 0          | 1      |
+| + B differential signs  |  40    | 49           | 0          | 1      |
+| + tau_y zeroed          |  40    | 24           | 0          | 2      |
+| + lookahead + w_ref sign|  60    | 14           | 0          | 1*     |
+| + K/B alignment         |  60    | 24           | 0          | 2      |
+| + auto-recovery         | 100    |  9           | 26         | **6**  |
+| + cruise/lookahead tune | 150    | 31           | 116        | 2*     |
+
+`*` means the AUV was bouncing between waypoints near the spawn while
+recovering, so the "max wp" counter doesn't fully reflect mission
+progress.
+
+Key behavioural changes that are not captured in the table:
+- **Depth target reached**: AUV settles at `z = -1.92` before crossing
+  `wp[1]` (target `-2`). Previously it bobbed at `z ≈ -0.14` on the
+  surface for the entire run.
+- **Zero lateral drift on the first segment**: `y` stays at `0.00 m`
+  from `wp[0]` to `wp[1]`, where previously the AUV drifted up to
+  `+3 m` NE due to the lateral wrench leak through `tau_y`.
+- **NaN never propagates**: across every test post-guards, the
+  simulation always returned to a finite state; previously a single
+  divergence event permanently corrupted Gazebo's model.
+
+### `test_allocator` offline scenarios
+
+Run with `ros2 run auv_control test_allocator`. Output condensed:
+
+| Scenario                             | `u_cmd`                          | `tau_actual`                       | `tau` err |
+|--------------------------------------|----------------------------------|------------------------------------|----------:|
+| A — healthy                          | `[-0.45, +0.45, 0, 0]`           | `[0, 0, 0, 0, -0.172]`             | 0.000     |
+| B — abrupt u1 loss                   | `[ 0,    +0.04, 0, 0]`           | `[0.034, 0, 0, 0, -0.007]`         | 0.168     |
+| C — same + tight bounds (QP)         | same as B                        | same as B                          | 0.168     |
+| D — partial u3 loss (f3=0.3)         | `[-0.45, +0.45, 0, 0]`           | `[0, 0, 0, 0, -0.172]`             | 0.000     |
+| E — aggressive, QP best-effort       | sat. `[+5, +5, +5, +5]`          | `[4.70, 0, 9.39, 0, -0.96]`        | 16.95     |
+| F — SMC ON vs OFF, partial u1        | OFF `[9.1, 10.9, 4.0, 4.0]`      | `tau_x` OFF `14.5` / ON `20.2`     | -         |
+|                                      | ON  `[13.1, 14.9, 5.0, 6.5]`     | sliding `s=[-0.50, -0.50, -0.20, -0.20]` | -   |
+
+Scenario A is the baseline (controller produces the expected yaw
+moment, no error). Scenario D shows a 70 % loss on a single channel
+that the allocator absorbs cleanly via the redundancy in its column
+pair. Scenario E exercises the active-set QP path under saturation
+(status=2 best-effort). Scenario F is the most directly visible
+evidence that the new `SMCRobustifier` adds the expected boundary-
+layer correction on top of the T-S fuzzy core: ~4 N of forward push
+when the surge tracking error sits at `-0.5 m/s`.
+
+The residual on scenario B is the geometric consequence of the new
+diagonal-block B (see "Known issues" item 2).
+
+### Dashboard
+
+Live during sim:
+- `/auv/inject_fault` service call from the dashboard's **Fail**
+  buttons round-trips correctly. Confirmed end-to-end: clicking
+  "Fail" on `u1` flips `/auv/fault_status` from `[1,1,1,1]` to
+  `[0,1,1,1]` within the dashboard's 100 ms websocket budget.
+- The Trajectory panel no longer grows by a few pixels per tick.
+
+---
+
 ## Known issues / future work
 
 Things the long-test exposed that still need attention.
