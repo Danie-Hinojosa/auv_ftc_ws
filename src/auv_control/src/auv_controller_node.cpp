@@ -89,6 +89,12 @@ class AUVController : public rclcpp::Node {
     declare_parameter("traj_scale",       6.0);
     declare_parameter("traj_depth",       -3.0);
 
+    // Water/air interface model. Above the surface the AUV gets no buoyancy,
+    // no hydrodynamic drag and no restoring moment; without this the
+    // controller would keep flying it indefinitely once it pops up.
+    declare_parameter("surface_z", 0.0);
+    declare_parameter("hull_half_height", 0.15);
+
     // Sliding-mode robustifier (Section 5.2 of Zhang et al.). Diagonal SMC
     // layered on top of the T-S fuzzy output. eta/phi per virtual channel
     // [surge, heave, pitch, yaw]. Defaults are conservative — bump eta
@@ -116,6 +122,9 @@ class AUVController : public rclcpp::Node {
     get_parameter("traj_scale", scale);
     get_parameter("traj_depth", depth);
     buildTrajectory(tname, scale, depth);
+
+    get_parameter("surface_z",        surface_z_);
+    get_parameter("hull_half_height", hull_half_height_);
 
     {
       bool smc_on;
@@ -198,8 +207,15 @@ class AUVController : public rclcpp::Node {
 
   void onReference(const std_msgs::msg::Float64MultiArray::SharedPtr m) {
     std::lock_guard<std::mutex> lk(mtx_);
-    // External reference override: switches us to manual mode and stops
-    // following the canned trajectory.
+    // The reference_generator_node publishes an idle [0,0,0,0,0] at low rate
+    // to keep the topic alive; that should NOT switch us into manual mode and
+    // wipe out the cascade outer loop. Only treat a message as a real override
+    // when at least one component is non-zero.
+    bool nonzero = false;
+    for (std::size_t i = 0; i < m->data.size() && i < 5; ++i) {
+      if (std::abs(m->data[i]) > 1e-6) { nonzero = true; break; }
+    }
+    if (!nonzero) return;
     manual_ref_ = true;
     for (std::size_t i = 0; i < m->data.size() && i < 5; ++i) {
       x_ref_(i) = m->data[i];
@@ -258,14 +274,20 @@ class AUVController : public rclcpp::Node {
         allocator_.allocate(tau_des, veh_.thrust_min, veh_.thrust_max, &status);
     const WrenchVec tau_actual = allocator_.actual_wrench(u_cmd);
 
-    // 4) Hydrodynamics (drag + restoring + buoyancy).
-    const Eigen::Vector3d buoy_body = buoyancyBodyFrame();
-    const Eigen::Vector3d restore_M = restoringMomentBodyFrame();
-    const Eigen::Vector3d drag_force = -Eigen::Vector3d(
+    // 4) Hydrodynamics (drag + restoring + buoyancy), gated by submersion.
+    //    Gazebo Classic doesn't simulate the air/water interface, so without
+    //    this gate the controller keeps applying full buoyancy + drag even
+    //    when the AUV pops above the surface, leaving it indefinitely
+    //    floating in mid-air. We scale every wet-only term by a 0..1 factor
+    //    that linearly transitions across the hull around the surface plane.
+    const double sub = submersion(pos_z_);
+    const Eigen::Vector3d buoy_body = sub * buoyancyBodyFrame();
+    const Eigen::Vector3d restore_M = sub * restoringMomentBodyFrame();
+    const Eigen::Vector3d drag_force = -sub * Eigen::Vector3d(
         veh_.drag_u * x_(0) + veh_.drag_uu * std::abs(x_(0)) * x_(0),
         veh_.drag_v * x_(1) + veh_.drag_vv * std::abs(x_(1)) * x_(1),
         veh_.drag_w * x_(2) + veh_.drag_ww * std::abs(x_(2)) * x_(2));
-    const Eigen::Vector3d drag_moment = -Eigen::Vector3d(
+    const Eigen::Vector3d drag_moment = -sub * Eigen::Vector3d(
         veh_.drag_p * p_roll_,
         veh_.drag_q * x_(3) + veh_.drag_qq * std::abs(x_(3)) * x_(3),
         veh_.drag_r * x_(4) + veh_.drag_rr * std::abs(x_(4)) * x_(4));
@@ -365,9 +387,17 @@ class AUVController : public rclcpp::Node {
     const double dz = wp.z - pos_z_;
     const double range_xy = std::hypot(dx, dy);
 
-    if (range_xy < waypoint_radius_) {
+    // Edge-triggered waypoint advance: only when the AUV crosses INTO the
+    // capture radius (transition from outside to inside). The old level-
+    // triggered check (advance every tick while range < radius) wrapped
+    // through the 8-waypoint lawnmower in ~1 s because the AUV starts
+    // already inside wp[0]'s radius and the controller's wall-clock step()
+    // fires faster than the AUV can leave the radius.
+    const bool inside = (range_xy < waypoint_radius_);
+    if (inside && !was_inside_wp_radius_) {
       wp_idx_ = (wp_idx_ + 1) % trajectory_.size();
     }
+    was_inside_wp_radius_ = inside;
 
     const double bearing = std::atan2(dy, dx);
     double yaw_err = bearing - yaw_;
@@ -394,6 +424,17 @@ class AUVController : public rclcpp::Node {
   }
 
   // ===== Hydrodynamic helpers ============================================
+  // Fraction of the AUV that is submerged: 1.0 fully under, 0.0 fully above
+  // the water surface (world frame, z=0). Linear ramp across hull_half_height_
+  // on either side of the surface plane gives a smooth handoff so the wrench
+  // doesn't switch discontinuously when the AUV crosses the interface.
+  double submersion(double z_world) const {
+    const double dz = z_world - surface_z_;  // dz > 0 means above water
+    if (dz <= -hull_half_height_) return 1.0;
+    if (dz >=  hull_half_height_) return 0.0;
+    return 0.5 - 0.5 * dz / hull_half_height_;
+  }
+
   // Body-frame buoyancy: world-frame  +B*z_world  rotated into the body.
   Eigen::Vector3d buoyancyBodyFrame() const {
     const double cr = std::cos(roll_),  sr = std::sin(roll_);
@@ -513,8 +554,10 @@ class AUVController : public rclcpp::Node {
   double GM_ = 0.05;
   double kp_surge_ = 0.6, kp_heave_ = 0.5, kp_yaw_ = 1.0;
   double cruise_speed_ = 0.6, waypoint_radius_ = 0.8;
+  double surface_z_ = 0.0, hull_half_height_ = 0.15;
   std::vector<Waypoint> trajectory_;
   std::size_t wp_idx_ = 0;
+  bool was_inside_wp_radius_ = false;
   std::deque<geometry_msgs::msg::PoseStamped> path_buf_;
 
   std::array<double, 4>    fault_ = {1.0, 1.0, 1.0, 1.0};

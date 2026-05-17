@@ -14,9 +14,13 @@
     waypoint_radius:      0.8
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
-    trajectory:        "hold"
+    trajectory:        "lawnmower"
     traj_scale:           6.0    # m
     traj_depth:          -2.0    # m  (close to spawn z=-1 for quick settle)
+
+    # Water/air interface (used to zero buoyancy + drag above the surface).
+    surface_z:            0.0    # world-frame z of the water plane (m)
+    hull_half_height:     0.15   # smooth submersion ramp width (m)
 
     # Sliding-mode robustifier (Section 5.2 extension).
     # Layered on top of the T-S fuzzy output: u_virtual = u_TS + u_SMC.

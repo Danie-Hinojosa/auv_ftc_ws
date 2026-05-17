@@ -16,6 +16,9 @@
     traj_scale:          10.0
     traj_depth:          -5.0
 
+    surface_z:            0.0
+    hull_half_height:     0.5    # rexrov hull is bigger
+
     # RexROV is ~75x heavier than the torpedo, so eta is scaled up to keep
     # the SMC contribution proportional to the available thrust envelope.
     smc_enabled:       true
