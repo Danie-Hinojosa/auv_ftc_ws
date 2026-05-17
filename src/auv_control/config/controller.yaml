@@ -1,9 +1,9 @@
 /**/auv_controller:
   ros__parameters:
     control_rate_hz:    50.0
-    thrust_max:          50.0     # N (per actuator channel)
-    thrust_min:         -50.0
-    buoyancy_force:     257.5     # mass*g*1.05 for 25 kg (5% positive)
+    thrust_max:          25.0     # N (per actuator channel; was 50, halved to keep Gazebo's solver stable)
+    thrust_min:         -25.0
+    buoyancy_force:     250.0     # mass*g*1.02 for 25 kg (near neutral, +0.2% positive)
     metacentric_height:   0.05    # m, GM positive = self-righting
 
     # Outer loop (position -> velocity reference) gains
@@ -22,6 +22,10 @@
     # Water/air interface (used to zero buoyancy + drag above the surface).
     surface_z:            0.0    # world-frame z of the water plane (m)
     hull_half_height:     0.15   # smooth submersion ramp width (m)
+
+    # First-order LPF on the wrench output. Smooths step changes the
+    # solver can't absorb. Set to 0 to disable.
+    wrench_tau:           0.1    # s
 
     # Sliding-mode robustifier (Section 5.2 extension).
     # Layered on top of the T-S fuzzy output: u_virtual = u_TS + u_SMC.

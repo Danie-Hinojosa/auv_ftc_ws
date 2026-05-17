@@ -100,6 +100,15 @@ class AUVController : public rclcpp::Node {
     declare_parameter("surface_z", 0.0);
     declare_parameter("hull_half_height", 0.15);
 
+    // First-order LPF on the published wrench. Without this, the controller
+    // can step the body wrench by tens of Newtons within a single 20 ms tick
+    // (saturation flips, allocator switching between pinv and QP solutions,
+    // membership weights crossing rule boundaries). Gazebo's rigid-body
+    // integrator can't absorb that and the AUV's angular rate diverges. A
+    // 100 ms time constant gives the solver a smooth slew without
+    // measurably hurting the tracking bandwidth.
+    declare_parameter("wrench_tau", 0.1);
+
     // Sliding-mode robustifier (Section 5.2 of Zhang et al.). Diagonal SMC
     // layered on top of the T-S fuzzy output. eta/phi per virtual channel
     // [surge, heave, pitch, yaw]. Defaults are conservative — bump eta
@@ -112,6 +121,12 @@ class AUVController : public rclcpp::Node {
 
     double rate_hz;
     get_parameter("control_rate_hz", rate_hz);
+    {
+      double tau;
+      get_parameter("wrench_tau", tau);
+      const double dt = 1.0 / std::max(rate_hz, 1.0);
+      wrench_alpha_ = (tau <= 1e-6) ? 1.0 : dt / (tau + dt);
+    }
     get_parameter("thrust_max",      veh_.thrust_max);
     get_parameter("thrust_min",      veh_.thrust_min);
     get_parameter("buoyancy_force",  veh_.buoyancy_force);
@@ -287,7 +302,8 @@ class AUVController : public rclcpp::Node {
         "state out of bounds (|x|=[%.1f %.1f %.1f %.1f %.1f] z=%.1f); "
         "publishing zero wrench",
         x_(0), x_(1), x_(2), x_(3), x_(4), pos_z_);
-      pub_wrench_->publish(geometry_msgs::msg::Wrench{});
+      w_filt_ = geometry_msgs::msg::Wrench{};
+      pub_wrench_->publish(w_filt_);
       return;
     }
 
@@ -347,15 +363,26 @@ class AUVController : public rclcpp::Node {
     // Last-line defense: if the state went non-finite (e.g., x_ from a
     // half-processed odom, or u_virtual blew up), every term above is NaN
     // and Gazebo permanently corrupts itself. Publish a zero wrench instead
-    // so gravity can settle the model on its own.
+    // so gravity can settle the model on its own. Also reset the filter so
+    // recovery ramps up from zero instead of from a stale NaN.
     if (!std::isfinite(w.force.x)  || !std::isfinite(w.force.y)  ||
         !std::isfinite(w.force.z)  || !std::isfinite(w.torque.x) ||
         !std::isfinite(w.torque.y) || !std::isfinite(w.torque.z)) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
         "non-finite wrench suppressed; publishing zero");
       w = geometry_msgs::msg::Wrench{};
+      w_filt_ = w;
     }
-    pub_wrench_->publish(w);
+
+    // First-order LPF (per axis). alpha was precomputed from wrench_tau in
+    // the ctor; alpha=1 disables the filter.
+    w_filt_.force.x  = wrench_alpha_ * w.force.x  + (1.0 - wrench_alpha_) * w_filt_.force.x;
+    w_filt_.force.y  = wrench_alpha_ * w.force.y  + (1.0 - wrench_alpha_) * w_filt_.force.y;
+    w_filt_.force.z  = wrench_alpha_ * w.force.z  + (1.0 - wrench_alpha_) * w_filt_.force.z;
+    w_filt_.torque.x = wrench_alpha_ * w.torque.x + (1.0 - wrench_alpha_) * w_filt_.torque.x;
+    w_filt_.torque.y = wrench_alpha_ * w.torque.y + (1.0 - wrench_alpha_) * w_filt_.torque.y;
+    w_filt_.torque.z = wrench_alpha_ * w.torque.z + (1.0 - wrench_alpha_) * w_filt_.torque.z;
+    pub_wrench_->publish(w_filt_);
 
     // 6) Diagnostics.
     publishVec(pub_u_,     {u_cmd(0),     u_cmd(1),     u_cmd(2),     u_cmd(3)});
@@ -480,11 +507,23 @@ class AUVController : public rclcpp::Node {
     // Yaw rate reference proportional to bearing error.
     const double r_ref = std::clamp(kp_yaw_ * yaw_err, -0.6, 0.6);
 
-    x_ref_(0) = u_ref;
+    // Rate-limit x_ref_ changes per tick to keep the inner loop from
+    // chasing a discontinuous setpoint. The outer loop produces step
+    // changes whenever wp_idx_ advances (bearing jumps, r_ref flips), and
+    // the T-S fuzzy K gains amplify those steps into thrust saturations
+    // that Gazebo's solver can't integrate without diverging. Slewing the
+    // reference at ~one outer-loop period gives the inner loop time to
+    // track without saturating.
+    const double dt = 1.0 / 50.0;  // step() nominal period
+    auto slew = [dt](double cur, double tgt, double max_rate) {
+      const double delta = std::clamp(tgt - cur, -max_rate * dt, max_rate * dt);
+      return cur + delta;
+    };
+    x_ref_(0) = slew(x_ref_(0), u_ref, 0.4);   // 0.4 m/s^2 surge slew
     x_ref_(1) = 0.0;
-    x_ref_(2) = w_ref;
+    x_ref_(2) = slew(x_ref_(2), w_ref, 0.4);   // 0.4 m/s^2 heave slew
     x_ref_(3) = 0.0;
-    x_ref_(4) = r_ref;
+    x_ref_(4) = slew(x_ref_(4), r_ref, 1.0);   // 1.0 rad/s^2 yaw-rate slew
   }
 
   // ===== Hydrodynamic helpers ============================================
@@ -626,6 +665,10 @@ class AUVController : public rclcpp::Node {
 
   std::array<double, 4>    fault_ = {1.0, 1.0, 1.0, 1.0};
   std::array<FaultRamp, 4> ramps_{};
+
+  // First-order LPF state for the wrench output.
+  geometry_msgs::msg::Wrench w_filt_{};
+  double wrench_alpha_ = 1.0;
 
   std::mutex mtx_;
   std::size_t tick_ = 0;
