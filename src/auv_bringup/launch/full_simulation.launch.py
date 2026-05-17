@@ -24,8 +24,11 @@ def generate_launch_description():
 
     # Small delay so Gazebo has time to spawn the AUV and start publishing
     # /auv/odom before the controller starts its 50 Hz loop.
+    # Was 3.0; reduced because Gazebo has no native buoyancy and during the
+    # delay the AUV free-falls ~44 m, slamming into the seabed. The controller
+    # already gates on have_odom_, so it can safely come up early.
     controller_launch = TimerAction(
-        period=3.0,
+        period=0.3,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(PathJoinSubstitution([

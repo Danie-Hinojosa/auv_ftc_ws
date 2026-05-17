@@ -67,9 +67,11 @@
     .footer{padding:10px 20px;color:var(--muted);font-size:11px;border-top:1px solid var(--grid);}
 
     /* Trajectory panel */
-    .traj-wrap{position:relative;flex:1;min-height:340px;background:#0a0d12;
-      border-radius:8px;border:1px solid var(--grid);overflow:hidden;}
-    .traj-wrap canvas{display:block;width:100%;height:100%;}
+    .traj-wrap{position:relative;flex:1;min-height:340px;height:340px;
+      background:#0a0d12;border-radius:8px;border:1px solid var(--grid);
+      overflow:hidden;}
+    .traj-wrap canvas{position:absolute;inset:0;display:block;
+      width:100%;height:100%;}
     .traj-legend{display:flex;gap:14px;font-size:11px;color:var(--muted);
       margin-top:6px;flex-wrap:wrap;}
     .traj-legend span{display:inline-flex;align-items:center;gap:6px;}
@@ -245,11 +247,17 @@ let currentPos   = null; // {x,y,yaw}
 let currentTarget= null; // {x,y}
 
 function resizeTrajCanvas(){
-  const r = trajCanvas.parentElement.getBoundingClientRect();
-  trajCanvas.width  = r.width  * devicePixelRatio;
-  trajCanvas.height = r.height * devicePixelRatio;
-  trajCanvas.style.width  = r.width  + 'px';
-  trajCanvas.style.height = r.height + 'px';
+  // Only resize the backing buffer when the displayed size actually changes.
+  // Setting style.width/height in px on a block-flow canvas turned the inline
+  // size into intrinsic parent content, which fed back into a layout loop
+  // that grew the Trajectory card by a few px on every interval tick.
+  // CSS handles the display size via width:100%;height:100% on an absolutely
+  // positioned canvas; here we only update the pixel-density backing buffer.
+  const r  = trajCanvas.getBoundingClientRect();
+  const bw = Math.round(r.width  * devicePixelRatio);
+  const bh = Math.round(r.height * devicePixelRatio);
+  if (trajCanvas.width !== bw)  trajCanvas.width  = bw;
+  if (trajCanvas.height !== bh) trajCanvas.height = bh;
 }
 window.addEventListener('resize', resizeTrajCanvas);
 

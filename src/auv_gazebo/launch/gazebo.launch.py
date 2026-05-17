@@ -40,7 +40,9 @@ def _launch_setup(context, *args, **kwargs):
         z0 = '-5.0'
     else:
         xacro_file = os.path.join(pkg_auv_desc, 'urdf', 'auv.urdf.xacro')
-        z0 = '-3.0'
+        # Spawn shallower so the AUV has room to stabilize before reaching the
+        # -20 m seabed (the controller has ~3 s of dead time at startup).
+        z0 = '-1.0'
 
     x0, y0 = '0.0', '0.0'
 

@@ -1,4 +1,4 @@
-auv_controller:
+/**/auv_controller:
   ros__parameters:
     control_rate_hz:    50.0
     thrust_max:        5000.0
@@ -16,7 +16,13 @@ auv_controller:
     traj_scale:          10.0
     traj_depth:          -5.0
 
-reference_generator:
+    # RexROV is ~75x heavier than the torpedo, so eta is scaled up to keep
+    # the SMC contribution proportional to the available thrust envelope.
+    smc_enabled:       true
+    smc_eta:           [400.0, 400.0, 80.0, 200.0]
+    smc_phi:           [0.10, 0.10, 0.05, 0.05]
+
+/**/reference_generator:
   ros__parameters:
     pattern:           "constant"
     rate_hz:               5.0

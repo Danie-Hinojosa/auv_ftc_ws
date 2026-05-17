@@ -1,9 +1,9 @@
-auv_controller:
+/**/auv_controller:
   ros__parameters:
     control_rate_hz:    50.0
     thrust_max:          50.0     # N (per actuator channel)
     thrust_min:         -50.0
-    buoyancy_force:     247.6     # mass*g*1.01 for 25 kg
+    buoyancy_force:     257.5     # mass*g*1.05 for 25 kg (5% positive)
     metacentric_height:   0.05    # m, GM positive = self-righting
 
     # Outer loop (position -> velocity reference) gains
@@ -14,11 +14,18 @@ auv_controller:
     waypoint_radius:      0.8
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
-    trajectory:        "lawnmower"
+    trajectory:        "hold"
     traj_scale:           6.0    # m
-    traj_depth:          -3.0    # m
+    traj_depth:          -2.0    # m  (close to spawn z=-1 for quick settle)
 
-reference_generator:
+    # Sliding-mode robustifier (Section 5.2 extension).
+    # Layered on top of the T-S fuzzy output: u_virtual = u_TS + u_SMC.
+    # Order: [surge, heave, pitch, yaw].
+    smc_enabled:       true
+    smc_eta:           [4.0, 4.0, 1.0, 2.5]    # switching gains (~N or N*m)
+    smc_phi:           [0.08, 0.08, 0.05, 0.05] # boundary layer (m/s or rad/s)
+
+/**/reference_generator:
   ros__parameters:
     pattern:           "constant"     # outer loop drives x_ref now;
     rate_hz:               5.0        # the legacy generator just keeps

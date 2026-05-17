@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 add_library(auv_control_core SHARED
   src/ts_fuzzy.cpp
   src/thrust_allocator.cpp
+  src/smc_robustifier.cpp
 )
 target_include_directories(auv_control_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

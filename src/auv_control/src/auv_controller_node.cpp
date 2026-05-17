@@ -48,6 +48,7 @@
 #include "auv_control/auv_params.hpp"
 #include "auv_control/ts_fuzzy.hpp"
 #include "auv_control/thrust_allocator.hpp"
+#include "auv_control/smc_robustifier.hpp"
 
 using namespace std::chrono_literals;
 
@@ -88,6 +89,16 @@ class AUVController : public rclcpp::Node {
     declare_parameter("traj_scale",       6.0);
     declare_parameter("traj_depth",       -3.0);
 
+    // Sliding-mode robustifier (Section 5.2 of Zhang et al.). Diagonal SMC
+    // layered on top of the T-S fuzzy output. eta/phi per virtual channel
+    // [surge, heave, pitch, yaw]. Defaults are conservative — bump eta
+    // upward to absorb larger matched uncertainty / disturbance bounds.
+    declare_parameter("smc_enabled", true);
+    declare_parameter<std::vector<double>>(
+        "smc_eta", std::vector<double>{4.0, 4.0, 1.0, 2.5});
+    declare_parameter<std::vector<double>>(
+        "smc_phi", std::vector<double>{0.08, 0.08, 0.05, 0.05});
+
     double rate_hz;
     get_parameter("control_rate_hz", rate_hz);
     get_parameter("thrust_max",      veh_.thrust_max);
@@ -106,6 +117,21 @@ class AUVController : public rclcpp::Node {
     get_parameter("traj_depth", depth);
     buildTrajectory(tname, scale, depth);
 
+    {
+      bool smc_on;
+      get_parameter("smc_enabled", smc_on);
+      smc_.set_enabled(smc_on);
+      const auto eta_v = get_parameter("smc_eta").as_double_array();
+      const auto phi_v = get_parameter("smc_phi").as_double_array();
+      std::array<double, 4> eta{}, phi{};
+      for (int i = 0; i < 4; ++i) {
+        eta[i] = (i < static_cast<int>(eta_v.size())) ? eta_v[i] : 0.0;
+        phi[i] = (i < static_cast<int>(phi_v.size())) ? phi_v[i] : 0.05;
+      }
+      smc_.set_eta(eta);
+      smc_.set_phi(phi);
+    }
+
     sub_odom_ = create_subscription<nav_msgs::msg::Odometry>(
       "odom", rclcpp::SensorDataQoS(),
       std::bind(&AUVController::onOdom, this, std::placeholders::_1));
@@ -121,6 +147,7 @@ class AUVController : public rclcpp::Node {
     pub_target_ = create_publisher<geometry_msgs::msg::PoseStamped>("target_pose", 10);
     pub_path_   = create_publisher<nav_msgs::msg::Path>("path", 10);
     pub_traj_   = create_publisher<nav_msgs::msg::Path>("trajectory", rclcpp::QoS(1).transient_local());
+    pub_smc_    = create_publisher<std_msgs::msg::Float64MultiArray>("smc_surface", 10);
 
     srv_fault_ = create_service<auv_control::srv::InjectFault>(
       "inject_fault",
@@ -135,9 +162,11 @@ class AUVController : public rclcpp::Node {
 
     RCLCPP_INFO(get_logger(),
       "auv_controller up: rate=%.1f Hz, thrust=[%+.1f,%+.1f] N, buoyancy=%.1f N, "
-      "trajectory='%s' (%zu wps)",
+      "trajectory='%s' (%zu wps), smc=%s eta=[%.2f %.2f %.2f %.2f]",
       rate_hz, veh_.thrust_min, veh_.thrust_max, veh_.buoyancy_force,
-      tname.c_str(), trajectory_.size());
+      tname.c_str(), trajectory_.size(),
+      smc_.enabled() ? "on" : "off",
+      smc_.eta()[0], smc_.eta()[1], smc_.eta()[2], smc_.eta()[3]);
   }
 
  private:
@@ -214,8 +243,14 @@ class AUVController : public rclcpp::Node {
     // 2) OUTER LOOP — pick current waypoint, compute body-frame velocity ref.
     if (!manual_ref_) updateReferenceFromTrajectory();
 
-    // 3) INNER LOOP — T-S fuzzy state feedback.
-    const ControlVec u_virtual = fuzzy_.compute(x_, x_ref_);
+    // 3) INNER LOOP — T-S fuzzy state feedback + SMC robustifier.
+    //    u_virtual = u_TS + u_SMC. The SMC term is a per-channel boundary-
+    //    layer term that absorbs matched uncertainty (drag mismatch, buoyancy
+    //    estimation error, unmodeled currents). When disabled in config it
+    //    contributes exactly zero — the loop reduces to the paper's core.
+    const ControlVec u_ts      = fuzzy_.compute(x_, x_ref_);
+    const ControlVec u_smc     = smc_.compute(x_, x_ref_);
+    const ControlVec u_virtual = u_ts + u_smc;
     const WrenchVec  tau_des   = allocator_.B() * u_virtual;
 
     int status = 0;
@@ -254,6 +289,8 @@ class AUVController : public rclcpp::Node {
     publishVec(pub_taud_,  {tau_des(0),   tau_des(1),   tau_des(2),   tau_des(3), tau_des(4)});
     publishVec(pub_taua_,  {tau_actual(0),tau_actual(1),tau_actual(2),tau_actual(3),tau_actual(4)});
     publishVec(pub_fault_, {fault_[0], fault_[1], fault_[2], fault_[3]});
+    const auto & s = smc_.last_surface();
+    publishVec(pub_smc_,   {s[0], s[1], s[2], s[3]});
     publishTargetPose();
     appendPath();
 
@@ -461,6 +498,7 @@ class AUVController : public rclcpp::Node {
   AllocParams      geom_{};
   ThrustAllocator  allocator_;
   TSFuzzyController fuzzy_;
+  SMCRobustifier   smc_;
 
   StateVec x_     = StateVec::Zero();
   StateVec x_ref_ = StateVec::Zero();
@@ -495,6 +533,7 @@ class AUVController : public rclcpp::Node {
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr     pub_target_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr                 pub_path_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr                 pub_traj_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr    pub_smc_;
   rclcpp::Service<auv_control::srv::InjectFault>::SharedPtr         srv_fault_;
   rclcpp::TimerBase::SharedPtr                                      timer_;
   rclcpp::TimerBase::SharedPtr                                      traj_timer_;

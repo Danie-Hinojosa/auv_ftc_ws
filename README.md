@@ -267,6 +267,7 @@ u3 loss), mirroring the conditions in the paper's Figures 5-11.
 | Eq. 38-42 — saturation + deviation QP formulation   | `ThrustAllocator::allocate()`                            |
 | Eq. 43-49 — active-set solver (KKT iteration)       | `ThrustAllocator::solve_qp()`                            |
 | Figure 2 — overall flow                             | `AUVController::step()` in `auv_controller_node.cpp`     |
+| Section 5.2 — SMC robustifier (Figs. 12-13)         | `SMCRobustifier::compute()` in `smc_robustifier.cpp`     |
 | Figure 3 — propulsion layout                        | `auv_description/urdf/auv.urdf.xacro`                    |
 | Figures 5-11 — simulation results                   | Reproducible via `test_allocator` and live topics         |
 
@@ -290,10 +291,16 @@ These are deliberate differences from the paper you should know about:
 3. **Sensor noise / state estimation.** We take `x(t)` directly from
    `libgazebo_ros_p3d` ground truth. The paper's Section 5 simulations
    make the same assumption (they are not testing a state observer).
-4. **No SMC.** The paper's Section 5.2 adds a sliding-mode-control layer
-   for robustness (Figs. 12-13, "Inspired by Ref. [30]"). We do not
-   implement this — it's explicitly positioned in the paper as an
-   extension, not part of the core contribution.
+4. **SMC layer.** The paper's Section 5.2 adds a sliding-mode-control
+   layer for robustness (Figs. 12-13, "Inspired by Ref. [30]"). We
+   implement this as a boundary-layer SMC robustifier
+   (`SMCRobustifier`) summed with the T-S fuzzy output before allocation:
+   `u_virtual = u_TS + u_SMC`, with `u_SMC,i = -eta_i * tanh(s_i / phi_i)`
+   and a diagonal sliding surface `s = [e_u, e_w, e_q, e_r]` that mirrors
+   the per-channel structure of the T-S gains. Tunable via
+   `smc_enabled`, `smc_eta`, `smc_phi` in `controller.yaml`; live surface
+   values are republished on `/auv/smc_surface`. Set `smc_enabled: false`
+   to recover the paper's pure T-S core behavior.
 
 ---
 

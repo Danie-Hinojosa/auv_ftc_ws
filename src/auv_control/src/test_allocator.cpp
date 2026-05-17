@@ -16,6 +16,7 @@
 #include "auv_control/auv_params.hpp"
 #include "auv_control/ts_fuzzy.hpp"
 #include "auv_control/thrust_allocator.hpp"
+#include "auv_control/smc_robustifier.hpp"
 
 using namespace auv_control;
 
@@ -98,6 +99,41 @@ int main() {
               << alloc.last_report() << "\n"
               << "tau error norm = "
               << (tau_des - tau_act).norm() << "\n";
+  }
+
+  // --- SMC layer comparison: T-S only vs T-S + SMC under the same error. ---
+  std::cout << "\n==== F  SMC robustifier ON vs OFF (large surge error, partial u1 loss) ====\n";
+  {
+    AllocParams      geom;
+    ThrustAllocator  alloc(geom);
+    TSFuzzyController fuzzy;
+    SMCRobustifier   smc;
+    smc.set_eta({4.0, 4.0, 1.0, 2.5});
+    smc.set_phi({0.08, 0.08, 0.05, 0.05});
+    alloc.set_fault_factors({0.5, 1.0, 1.0, 1.0});   // u1 at 50% capacity
+
+    StateVec x;      x     << 0.5, 0.0, 0.0, 0.0, 0.10;
+    StateVec x_ref;  x_ref << 1.0, 0.0, 0.2, 0.0, 0.00;   // 0.5 m/s surge gap
+
+    smc.set_enabled(false);
+    const ControlVec u_off = fuzzy.compute(x, x_ref) + smc.compute(x, x_ref);
+    smc.set_enabled(true);
+    const ControlVec u_on  = fuzzy.compute(x, x_ref) + smc.compute(x, x_ref);
+    const ControlVec delta = u_on - u_off;
+
+    print_vec("u (smc off)",   u_off);
+    print_vec("u (smc on)",    u_on);
+    print_vec("delta_smc",     delta);
+    print_vec("sliding s",
+              Eigen::Map<const Eigen::Vector4d>(smc.last_surface().data()));
+
+    int status_off = 0, status_on = 0;
+    const WrenchVec tau_off = alloc.actual_wrench(
+        alloc.allocate(alloc.B() * u_off, -50.0, 50.0, &status_off));
+    const WrenchVec tau_on  = alloc.actual_wrench(
+        alloc.allocate(alloc.B() * u_on,  -50.0, 50.0, &status_on));
+    std::cout << "tau_x  off=" << tau_off(0) << "  on=" << tau_on(0)
+              << "   (SMC should add forward push to close the surge gap)\n";
   }
   return 0;
 }
