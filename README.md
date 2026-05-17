@@ -304,6 +304,154 @@ These are deliberate differences from the paper you should know about:
 
 ---
 
+## Fork changes log (Danie-Hinojosa fork)
+
+Iterative fixes layered on top of the upstream snapshot. Each bullet
+maps to its commit; see `git log` for the full diffs.
+
+### Controller / algorithmic
+- **SMC robustifier layer.** `SMCRobustifier` class summed with the
+  T-S fuzzy output before allocation. Diagonal sliding surface, tanh
+  boundary layer, per-channel `eta` and `phi`. See "SMC layer" in the
+  simplifications section above.
+- **B matrix realigned to a torpedo layout.** The original B mixed
+  every channel into every wrench axis and collapsed the pitch / yaw
+  rows to the same scalar (`u1+u2+u3+u4`). The current B is a clean
+  block-diagonal: `u1, u2` are port/stbd surge thrusters (collective →
+  `tau_x`, differential → `tau_n`); `u3, u4` are top/bottom heave
+  thrusters (collective → `tau_z`, differential → `tau_m`). `tau_y`
+  is zeroed (no sway thruster on a torpedo).
+- **K matrix rewritten to match the new B.** Each error component
+  drives the channel pair that actually produces force on that axis.
+  See `ts_fuzzy.cpp::make_gain()`. The SMC sliding-surface map was
+  updated in parallel (`ch 0, 1 → e_u`; `ch 2, 3 → e_w`).
+- **Allocator Tikhonov regularization.** With `tau_y = 0` the matrix
+  `B Winv B^T` is rank-deficient; `LDLT` was silently returning garbage
+  and the allocator handed back `u_virtual` unchanged on faults. A
+  `1e-9 I` diagonal damping in the pinv, QP warm-start, and active-set
+  KKT solves fixes the kernel direction without changing min-norm
+  behaviour.
+- **Pure-pursuit lookahead.** Goal point slides linearly from `curr_wp`
+  toward `next_wp` as `range_to_curr` drops from `waypoint_radius +
+  lookahead` to `waypoint_radius`. The pre- and post-advance goal
+  points coincide, so `r_ref` is continuous across waypoint
+  transitions. Tunable via `lookahead`.
+- **Edge-triggered waypoint advance.** Old level-triggered check
+  wrapped through the 8-waypoint lawnmower in milliseconds at spawn.
+- **`onReference` ignores idle keep-alive.** `reference_generator_node`
+  publishes `[0,0,0,0,0]` to keep `/auv/reference_state` alive, which
+  was wedging the controller into manual mode forever. Now only
+  non-zero references switch to manual override.
+- **`w_ref` sign fix.** The original `clamp(-kp_heave * dz, ...)`
+  command pushed the AUV UP when the target was deeper. Sign removed.
+- **Outer-loop reference slew.** Per-tick rate limits on `u_ref`,
+  `w_ref`, `r_ref` so the inner loop doesn't chase a discontinuous
+  setpoint at waypoint transitions.
+- **Submersion gate on hydrodynamics.** `buoyancy`, `restoring` and
+  `drag` are now multiplied by a `[0, 1]` factor that ramps over
+  `hull_half_height` around `surface_z`. The AUV no longer flies
+  indefinitely once it pops above the water plane.
+- **NaN / out-of-bounds guards.** Three layers: drop non-finite odom
+  messages; suppress wrench when `|x|` exceeds physical bounds;
+  zero the message if any final wrench component is non-finite. The
+  simulation never gets permanently corrupted.
+- **Auto-recovery after divergence.** When the bounds guard releases,
+  snap `wp_idx_` to the closest waypoint, reset `x_ref` to current
+  state and zero the wrench LPF, so the AUV resumes the mission
+  instead of fighting a stale setpoint from a different operating
+  point.
+- **Wrench LPF.** First-order low-pass on the published wrench
+  (`wrench_tau` parameter, default 0.1 s) so step changes don't excite
+  Gazebo's solver.
+
+### Simulation stability
+- `buoyancy_force` 247.6 → 250 N (≈ 1.02× `m·g`; near neutral).
+- `thrust_max` 50 → 25 N to keep solver inside its stable regime.
+- Thruster moment arms `a, b` 0.10 → 0.30 m, so the realized yaw rate
+  matches the cascade outer loop's `r_ref`.
+- `cruise_speed` 0.6 → 0.3 m/s and `kp_yaw` 1.0 → 1.5 so the AUV can
+  actually complete a 90° turn within one segment of the lawnmower.
+- `lookahead` 2.0 m default (parameter).
+- `auv_bringup`: controller `TimerAction` delay 3.0 s → 0.3 s. The
+  three-second gravity-only free fall after spawn was driving the AUV
+  into the seabed before the controller ever published a wrench.
+- `auv_gazebo`: torpedo spawn `z` `-3` → `-1`; removed an install
+  reference to a non-existent `config/` directory that broke
+  `colcon build --symlink-install`.
+
+### Dashboard
+- Trajectory panel grew a few pixels per `setInterval` tick because
+  `resizeTrajCanvas` was writing the canvas size back as inline CSS.
+  Fixed via `position: absolute; inset: 0` and a no-op resize when
+  the displayed size hasn't changed.
+
+### Container / bring-up notes
+On a setup where the host's GPU passthrough is finicky (NVIDIA dGPU
+in PRIME on-demand, Intel Arc iGPU that Mesa `iris` doesn't yet
+support) the simulation needs three environment overrides on top of
+the packaged `docker compose`:
+```bash
+unset __GLX_VENDOR_LIBRARY_NAME __NV_PRIME_RENDER_OFFLOAD
+export LIBGL_ALWAYS_SOFTWARE=1
+export GAZEBO_MODEL_DATABASE_URI=""
+export CYCLONEDDS_URI=file:///tmp/cyclonedds_relaxed.xml   # SocketReceiveBufferSize min="default"
+```
+
+---
+
+## Known issues / future work
+
+Things the long-test exposed that still need attention.
+
+1. **Lawnmower never completes a full lap.** The AUV reaches `wp[1]`
+   and `wp[2]` cleanly but eventually diverges during the next
+   90° turn. Mechanism: as the AUV rotates past 90°, the world-frame
+   velocity vector projects into body frame with the opposite sign,
+   `e_u` jumps a couple m/s in a single tick, the K matrix saturates
+   `u_virtual` to ±25 N, and Gazebo Classic's solver can't absorb the
+   resulting wrench step. The auto-recovery + NaN guards keep the
+   simulation alive (AUV got as far as `wp[6]` in the most recent
+   long-test) but it never tracks the full lap cleanly. A real fix
+   would be one of:
+   - migrate to Gazebo Garden / Harmonic (better solver);
+   - smooth the trajectory with arcs instead of sharp 90° corners;
+   - rewrite the inner loop with Coriolis-style decoupling so that
+     `e_u` is computed relative to the bearing direction rather than
+     a sign-flipping body axis.
+2. **Allocator behaviour with the cleaner B is less "redundant".**
+   The new diagonal-block B is geometrically honest — `u1` and `u2`
+   are the only channels that can generate `tau_x` and `tau_n`. When
+   `u1` dies, the constraints `tau_x = 0` and `tau_n ≠ 0` are
+   contradictory with only `u2` left, so the weighted-pinv returns
+   a small least-squares compromise instead of a full reallocation.
+   This is the right math, but it makes the fault-tolerance demo
+   less dramatic than the upstream B did. Possible follow-ups:
+   add a vectored thrust column to `B` (small off-diagonal coupling)
+   so each fault has a graceful fallback path, or accept the new
+   geometry and write a more nuanced demo scenario.
+3. **`reference_generator_node` is vestigial.** Now that the cascade
+   outer loop drives `x_ref` from the trajectory, the reference
+   generator only exists to keep `/auv/reference_state` alive at low
+   rate. The `onReference` callback ignores its idle messages but the
+   node still runs. Either remove it from the launches or repurpose
+   it (e.g., to publish a step disturbance during a test scenario).
+4. **No FDI.** Faults are still injected manually via the
+   `/auv/inject_fault` service (or the dashboard button). A residual-
+   based detector that estimates `f_i` online from
+   `tau_des - tau_actual` would close the loop and lets the demo
+   show the controller noticing a fault on its own. The existing
+   `/auv/fault_status` topic already carries the right vector for a
+   FDI estimate to replace the manually-injected values.
+5. **State observer / sensor noise.** Still using p3d ground truth.
+   Gap #3 in the simplifications list — adding an EKF/UKF with
+   realistic IMU + DVL noise is a natural follow-on.
+6. **Long-test ergonomics.** Bring-up requires four environment
+   overrides above; bundle them into `scripts/run_sim.sh` to make it
+   one command, and add a `.gitignore` to the workspace root for the
+   colcon `build/`, `install/`, `log/` directories.
+
+---
+
 ## Troubleshooting
 
 * **`/auv/odom` is silent.** Check that the `libgazebo_ros_p3d` plugin
