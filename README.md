@@ -304,7 +304,7 @@ These are deliberate differences from the paper you should know about:
 
 ---
 
-## Fork changes log (Danie-Hinojosa fork)
+## Fork changes log (TE3002B.102 — Team 2)
 
 Iterative fixes layered on top of the upstream snapshot. Each bullet
 maps to its commit; see `git log` for the full diffs.
