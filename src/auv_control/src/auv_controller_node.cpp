@@ -404,10 +404,14 @@ class AUVController : public rclcpp::Node {
     while (yaw_err >  3.14159) yaw_err -= 2 * 3.14159;
     while (yaw_err < -3.14159) yaw_err += 2 * 3.14159;
 
-    // u_ref: cruise speed scaled down when we have a big yaw error.
-    const double align = std::cos(yaw_err);
+    // u_ref: cruise speed scaled by yaw alignment. The old gate used
+    // max(cos(yaw_err), 0), which fully cuts surge thrust for any
+    // misalignment above 90 deg and leaves the AUV spinning in place.
+    // Using (1 + cos)/2 keeps a graceful "creep while turning" profile:
+    // factor=1 when aligned, 0.5 at 90 deg, 0 only when facing away.
+    const double align = 0.5 * (1.0 + std::cos(yaw_err));
     const double u_ref = std::clamp(
-        kp_surge_ * range_xy * std::max(align, 0.0),
+        kp_surge_ * range_xy * align,
         0.0, cruise_speed_);
 
     // Heave reference proportional to depth error (saturated).
