@@ -6,14 +6,22 @@
     buoyancy_force:     250.0     # mass*g*1.02 for 25 kg (near neutral, +0.2% positive)
     metacentric_height:   0.05    # m, GM positive = self-righting
 
-    # Outer loop (position -> velocity reference) gains
+    # Outer loop (position -> velocity reference) gains.
+    # cruise_speed dropped from 0.6 to 0.3: at 0.6 m/s plus a ~0.21 rad/s
+    # realized yaw rate, a 90 deg turn travels 4.5 m forward -- more than
+    # the 3 m segments of the lawnmower, so the AUV always overshot.
+    # kp_yaw bumped 1.0 -> 1.5 so r_ref saturates at smaller bearing
+    # errors and the outer loop starts the turn earlier.
+    # lookahead 2.0 -> 3.0 anticipates the wp transition over one full
+    # segment, so the goal is blending toward the next wp long before
+    # the AUV is on top of the current one.
     kp_surge:             0.6
     kp_heave:             0.5
-    kp_yaw:               1.0
-    cruise_speed:         0.6
+    kp_yaw:               1.5
+    cruise_speed:         0.3
     waypoint_radius:      0.8
-    approach_decel:       3.0    # taper cruise to 0 over the last 2.4 m before each wp
-    lookahead:            2.0    # blend goal toward next_wp over this distance
+    approach_decel:       3.0
+    lookahead:            3.0
 
     # Trajectory: hold | waypoints | lawnmower | figure8 | circle
     trajectory:        "lawnmower"
