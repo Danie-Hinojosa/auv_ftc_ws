@@ -309,7 +309,33 @@ class AUVController : public rclcpp::Node {
         x_(0), x_(1), x_(2), x_(3), x_(4), pos_z_);
       w_filt_ = geometry_msgs::msg::Wrench{};
       pub_wrench_->publish(w_filt_);
+      state_was_insane_ = true;
       return;
+    }
+
+    // Auto-recovery: if we just came out of a divergence episode the AUV is
+    // likely far from where the outer loop last left it pointing, with a
+    // stale x_ref that the slew limiter would now drag back to slowly. Snap
+    // the trajectory anchor to the nearest waypoint and reset the slewed
+    // reference to the current state so the inner loop starts from a clean
+    // operating point instead of fighting a phantom setpoint.
+    if (state_was_insane_) {
+      std::size_t best_idx = wp_idx_;
+      double best_dist = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0; i < trajectory_.size(); ++i) {
+        const double d = std::hypot(trajectory_[i].x - pos_x_,
+                                    trajectory_[i].y - pos_y_);
+        if (d < best_dist) { best_dist = d; best_idx = i; }
+      }
+      RCLCPP_WARN(get_logger(),
+        "recovered from divergence at pos=(%+.1f, %+.1f, %+.1f); "
+        "re-anchoring to wp[%zu] (dist=%.1f)",
+        pos_x_, pos_y_, pos_z_, best_idx, best_dist);
+      wp_idx_ = best_idx;
+      was_inside_wp_radius_ = false;
+      x_ref_ = x_;
+      w_filt_ = geometry_msgs::msg::Wrench{};
+      state_was_insane_ = false;
     }
 
     // 1) Faults / priority matrix.
@@ -691,6 +717,7 @@ class AUVController : public rclcpp::Node {
   std::vector<Waypoint> trajectory_;
   std::size_t wp_idx_ = 0;
   bool was_inside_wp_radius_ = false;
+  bool state_was_insane_ = false;
   std::deque<geometry_msgs::msg::PoseStamped> path_buf_;
 
   std::array<double, 4>    fault_ = {1.0, 1.0, 1.0, 1.0};
