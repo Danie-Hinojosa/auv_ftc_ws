@@ -97,9 +97,16 @@ inline Eigen::Matrix<double, 5, 4> build_B(const AllocParams & g) {
   const double A  = 0.5 * g.b * sa + 0.5 * g.a * ca;
   const double Ba = 0.5 * g.b * cb + 0.5 * g.a * sb;
 
+  // tau_y row is zero: a torpedo with no lateral thruster can't generate
+  // sway. The original (sa, ca, 0, 0) meant every Newton on the heave
+  // channel produced ~0.94 N of lateral force in world frame, dragging
+  // the AUV sideways and decoupling ground-track from heading. The K
+  // matrix's diagonal labels (u1=surge, u2=heave, u3=pitch, u4=yaw) already
+  // assume no sway authority, so the wrench column was just leaking
+  // unrequested lateral disturbance into the plant.
   Eigen::Matrix<double, 5, 4> B;
   B << g.l * ca,  ca,      cb,      cb,
-       sa,        ca,      0.0,     0.0,
+       0.0,       0.0,     0.0,     0.0,
        0.0,       0.0,     cb,      sb,
        -A,        A,      -A,       A,
        Ba,       -Ba,     -Ba,      Ba;
